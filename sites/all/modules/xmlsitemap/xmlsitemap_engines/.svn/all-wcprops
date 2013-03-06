@@ -1,0 +1,35 @@
+K 25
+svn:wc:ra_dav:version-url
+V 114
+/svn/mariquecalcus/!svn/ver/307/trunk/drupal-poly/drupal-poly-7.12/sites/all/modules/xmlsitemap/xmlsitemap_engines
+END
+xmlsitemap_engines.module
+K 25
+svn:wc:ra_dav:version-url
+V 140
+/svn/mariquecalcus/!svn/ver/307/trunk/drupal-poly/drupal-poly-7.12/sites/all/modules/xmlsitemap/xmlsitemap_engines/xmlsitemap_engines.module
+END
+xmlsitemap_engines.install
+K 25
+svn:wc:ra_dav:version-url
+V 141
+/svn/mariquecalcus/!svn/ver/307/trunk/drupal-poly/drupal-poly-7.12/sites/all/modules/xmlsitemap/xmlsitemap_engines/xmlsitemap_engines.install
+END
+xmlsitemap_engines.info
+K 25
+svn:wc:ra_dav:version-url
+V 138
+/svn/mariquecalcus/!svn/ver/307/trunk/drupal-poly/drupal-poly-7.12/sites/all/modules/xmlsitemap/xmlsitemap_engines/xmlsitemap_engines.info
+END
+xmlsitemap_engines.api.php
+K 25
+svn:wc:ra_dav:version-url
+V 141
+/svn/mariquecalcus/!svn/ver/307/trunk/drupal-poly/drupal-poly-7.12/sites/all/modules/xmlsitemap/xmlsitemap_engines/xmlsitemap_engines.api.php
+END
+xmlsitemap_engines.admin.inc
+K 25
+svn:wc:ra_dav:version-url
+V 143
+/svn/mariquecalcus/!svn/ver/307/trunk/drupal-poly/drupal-poly-7.12/sites/all/modules/xmlsitemap/xmlsitemap_engines/xmlsitemap_engines.admin.inc
+END

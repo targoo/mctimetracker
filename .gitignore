@@ -1,0 +1,26 @@
+# Ignore configuration files that may contain sensitive information.
+sites/*/settings*.php
+
+# Ignore paths that contain user-generated content.
+sites/*/files
+sites/*/private
+
+# Ignore the SASS cache
+.sass-cache
+.DS_Store
+
+# Remove Drupal's text files
+LICENSE.txt
+INSTALL.txt
+UPGRADE.txt
+CHANGELOG.txt
+COPYRIGHT.txt
+LICENCE.txt
+MAINTAINERS.txt
+INSTALL.sqlite.txt
+INSTALL.pgsql.txt
+INSTALL.mysql.txt
+README.txt
+
+# Specific server files
+.htaccess
