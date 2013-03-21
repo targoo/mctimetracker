@@ -31,40 +31,56 @@ function commerce_paypal_wps_commerce_payment_method_info() {
 }
 
 /**
- * Payment method callback: settings form.
+ * Returns the default settings for the PayPal WPS payment method.
  */
-function commerce_paypal_wps_settings_form($settings = NULL) {
-  $form = array();
-
-  // Merge default settings into the stored settings array.
+function commerce_paypal_wps_default_settings() {
   $default_currency = variable_get('commerce_default_currency', 'USD');
 
-  $settings = (array) $settings + array(
+  return array(
     'business' => '',
     'currency_code' => in_array($default_currency, array_keys(commerce_paypal_wps_currencies())) ? $default_currency : 'USD',
+    'allow_supported_currencies' => FALSE,
     'language' => 'US',
     'server' => 'sandbox',
     'payment_action' => 'sale',
     'ipn_logging' => 'notification',
+    'show_payment_instructions' => FALSE,
+    'ipn_create_billing_profile' => FALSE,
   );
+}
+
+/**
+ * Payment method callback: settings form.
+ */
+function commerce_paypal_wps_settings_form($settings = array()) {
+  $form = array();
+
+  // Merge default settings into the stored settings array.
+  $settings = (array) $settings + commerce_paypal_wps_default_settings();
 
   $form['business'] = array(
     '#type' => 'textfield',
     '#title' => t('PayPal e-mail address'),
-    '#description' => t('The e-mail address you use for the PayPal account you want to receive payments.'),
+    '#description' => t('The primary e-mail address of the PayPal account you want to use to receive payments.'),
     '#default_value' => $settings['business'],
     '#required' => TRUE,
   );
   $form['currency_code'] = array(
     '#type' => 'select',
-    '#title' => t('Currency code'),
-    '#description' => t('Transactions can only be processed in one of the listed currencies.'),
+    '#title' => t('Default currency'),
+    '#description' => t('Transactions in other currencies will be converted to this currency, so multi-currency sites must be configured to use appropriate conversion rates.'),
     '#options' => commerce_paypal_wps_currencies(),
     '#default_value' => $settings['currency_code'],
   );
+  $form['allow_supported_currencies'] = array(
+    '#type' => 'checkbox',
+    '#title' => t('Allow transactions to use any currency in the options list above.'),
+    '#description' => t('Transactions in unsupported currencies will still be converted into the default currency.'),
+    '#default_value' => $settings['allow_supported_currencies'],
+  );
   $form['language'] = array(
     '#type' => 'select',
-    '#title' => t('PayPal login page language'),
+    '#title' => t('PayPal login page language / locale'),
     '#options' => commerce_paypal_wps_languages(),
     '#default_value' => $settings['language'],
   );
@@ -95,22 +111,54 @@ function commerce_paypal_wps_settings_form($settings = NULL) {
     ),
     '#default_value' => $settings['ipn_logging'],
   );
+  $form['show_payment_instructions'] = array(
+    '#type' => 'checkbox',
+    '#title' => t('Show a message on the checkout form when PayPal WPS is selected telling the customer to "Continue with checkout to complete payment via PayPal."'),
+    '#default_value' => $settings['show_payment_instructions'],
+  );
+  $form['ipn_create_billing_profile'] = array(
+    '#type' => 'checkbox',
+    '#title' => t('Create a billing profile based on name and country data in the IPN for any order that does not have one yet.'),
+    '#description' => t('This is most useful for sites that do not collect billing information locally but still want to have customer names on orders.'),
+    '#default_value' => $settings['ipn_create_billing_profile'],
+  );
 
   return $form;
 }
 
 /**
- * Payment method callback: adds a message and CSS to the submission form.
+ * Payment method callback: adds a message and CSS to the submission form if
+ * enabled in the payment method settings.
  */
 function commerce_paypal_wps_submit_form($payment_method, $pane_values, $checkout_pane, $order) {
-  $form['paypal_wps_information'] = array(
-    '#markup' => '<span class="commerce-paypal-wps-info">' . t('(Continue with checkout to complete payment via Paypal.)') . '</span>',
-    '#attached' => array(
-      'css' => array(drupal_get_path('module', 'commerce_paypal_wps') . '/theme/commerce_paypal_wps.css'),
-    ),
-  );
+  $form = array();
+
+  if (!empty($payment_method['settings']['show_payment_instructions'])) {
+    $form['paypal_wps_information'] = array(
+      '#markup' => '<span class="commerce-paypal-wps-info">' . t('(Continue with checkout to complete payment via PayPal.)') . '</span>',
+    );
+  }
 
   return $form;
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter().
+ */
+function commerce_paypal_wps_form_commerce_checkout_form_alter(&$form, &$form_state) {
+  // If this checkout form contains the payment method radios...
+  if (!empty($form['commerce_payment']['payment_method']['#options'])) {
+    // Loop over its options array looking for a PayPal WPS option.
+    foreach (array_keys($form['commerce_payment']['payment_method']['#options']) as $key) {
+      list($method_id, $rule_name) = explode('|', $key);
+
+      // If we find PayPal WPS, include its CSS on the form and exit the loop.
+      if ($method_id == 'paypal_wps') {
+        $form['commerce_payment']['payment_method']['#attached']['css'][] = drupal_get_path('module', 'commerce_paypal_wps') . '/theme/commerce_paypal_wps.theme.css';
+        break;
+      }
+    }
+  }
 }
 
 /**
@@ -144,7 +192,7 @@ function commerce_paypal_wps_redirect_form($form, &$form_state, $order, $payment
 function commerce_paypal_wps_redirect_form_validate($order, $payment_method) {
   if (!empty($payment_method['settings']['ipn_logging']) &&
     $payment_method['settings']['ipn_logging'] == 'full_ipn') {
-    watchdog('commerce_paypal_wps', 'Customer returned from PayPal with the following POST data:<pre>' . check_plain(print_r($_POST, TRUE)) . '</pre>', array(), WATCHDOG_NOTICE);
+    watchdog('commerce_paypal_wps', 'Customer returned from PayPal with the following POST data:!ipn_data', array('!ipn_data' => '<pre>' . check_plain(print_r($_POST, TRUE)) . '</pre>'), WATCHDOG_NOTICE);
   }
 
   // This may be an unnecessary step, but if for some reason the user does end
@@ -161,17 +209,26 @@ function commerce_paypal_wps_redirect_form_validate($order, $payment_method) {
 function commerce_paypal_wps_paypal_ipn_validate($order, $payment_method, $ipn) {
   // Return FALSE if the receiver e-mail does not match the one specified by
   // the payment method instance.
-  if ($ipn['receiver_email'] != $payment_method['settings']['business']) {
+  if (trim(strtolower($ipn['receiver_email'])) != trim(strtolower($payment_method['settings']['business']))) {
     commerce_payment_redirect_pane_previous_page($order);
-    watchdog('commerce_paypal_wps', 'IPN rejected: invalid receiver e-mail specified (@receiver_email).', array('@receiver_email' => $ipn['receiver_email']), WATCHDOG_NOTICE);
+    watchdog('commerce_paypal_wps', 'IPN rejected: invalid receiver e-mail specified (@receiver_email); must match the primary e-mail address on the PayPal account.', array('@receiver_email' => $ipn['receiver_email']), WATCHDOG_NOTICE);
     return FALSE;
   }
 
+  // Prepare the IPN data for inclusion in the watchdog message if enabled.
+  $ipn_data = '';
+
+  if (!empty($payment_method['settings']['ipn_logging']) &&
+    $payment_method['settings']['ipn_logging'] == 'full_ipn') {
+    $ipn_data = '<pre>' . check_plain(print_r($ipn, TRUE)) . '</pre>';
+  }
+
+  // Log a message including the PayPal transaction ID if available.
   if (!empty($ipn['txn_id'])) {
-    watchdog('commerce_paypal_wps', 'IPN validated for Order @order_number with ID @txn_id.', array('@order_number' => $order->order_number, '@txn_id' => $ipn['txn_id']), WATCHDOG_NOTICE);
+    watchdog('commerce_paypal_wps', 'IPN validated for Order @order_number with ID @txn_id.!ipn_data', array('@order_number' => $order->order_number, '@txn_id' => $ipn['txn_id'], '!ipn_data' => $ipn_data), WATCHDOG_NOTICE);
   }
   else {
-    watchdog('commerce_paypal_wps', 'IPN validated for Order @order_number.', array('@order_number' => $order->order_number), WATCHDOG_NOTICE);
+    watchdog('commerce_paypal_wps', 'IPN validated for Order @order_number.!ipn_data', array('@order_number' => $order->order_number, '!ipn_data' => $ipn_data), WATCHDOG_NOTICE);
   }
 }
 
@@ -245,6 +302,41 @@ function commerce_paypal_wps_paypal_ipn_process($order, $payment_method, &$ipn) 
   commerce_payment_transaction_save($transaction);
   $ipn['transaction_id'] = $transaction->transaction_id;
 
+  // Create a billing profile based on the IPN if enabled.
+  if (!empty($payment_method['settings']['ipn_create_billing_profile']) && isset($order->commerce_customer_billing)) {
+    $order_wrapper = entity_metadata_wrapper('commerce_order', $order);
+
+    // If this order does not have a billing profile yet...
+    if ($order_wrapper->commerce_customer_billing->value() === NULL) {
+      // Ensure we have the required data in the IPN.
+      if (empty($ipn['residence_country']) || empty($ipn['first_name']) || empty($ipn['last_name'])) {
+        $data = array_intersect_key($ipn, drupal_map_assoc(array('residence_country', 'first_name', 'last_name')));
+        watchdog('commerce_paypal_wps', 'A billing profile for Order @order_number could not be created due to insufficient data in the IPN:!data', array('@order_number' => $order->order_number, '!data' => '<pre>'. check_plain(print_r($data, TRUE)) .'</pre>'), WATCHDOG_WARNING);
+      }
+      else {
+        // Create the new profile now.
+        $profile = commerce_customer_profile_new('billing', $order->uid);
+
+        // Add the address value.
+        $profile_wrapper = entity_metadata_wrapper('commerce_customer_profile', $profile);
+
+        $profile_wrapper->commerce_customer_address = array_merge(addressfield_default_values(), array(
+          'country' => $ipn['residence_country'],
+          'name_line' => $ipn['first_name'] . ' ' . $ipn['last_name'],
+          'first_name' => $ipn['first_name'],
+          'last_name' => $ipn['last_name'],
+        ));
+
+        // Save the profile, reference it from the order, and save the order.
+        $profile_wrapper->save();
+        $order_wrapper->commerce_customer_billing = $profile_wrapper;
+        $order_wrapper->save();
+
+        watchdog('commerce_paypal_wps', 'Billing profile created for Order @order_number containing the first and last names and residence country of the customer based on IPN data.', array('@order_number' => $order->order_number));
+      }
+    }
+  }
+
   commerce_payment_redirect_pane_next_page($order);
   watchdog('commerce_paypal_wps', 'IPN processed for Order @order_number with ID @txn_id.', array('@txn_id' => $ipn['txn_id'], '@order_number' => $order->order_number), WATCHDOG_INFO);
 }
@@ -274,7 +366,16 @@ function commerce_paypal_wps_paypal_ipn_process($order, $payment_method, &$ipn) 
 function commerce_paypal_wps_order_form($form, &$form_state, $order, $settings) {
   $wrapper = entity_metadata_wrapper('commerce_order', $order);
 
-  $currency_code = $wrapper->commerce_order_total->currency_code->value();
+  // Determine the currency code to use to actually process the transaction,
+  // which will either be the default currency code or the currency code of the
+  // order if it's supported by PayPal if that option is enabled.
+  $currency_code = $settings['currency_code'];
+  $order_currency_code = $wrapper->commerce_order_total->currency_code->value();
+
+  if (!empty($settings['allow_supported_currencies']) && in_array($order_currency_code, array_keys(commerce_paypal_wps_currencies()))) {
+    $currency_code = $order_currency_code;
+  }
+
   $amount = $wrapper->commerce_order_total->amount->value();
 
   // Ensure a default value for the payment_method setting.
@@ -316,14 +417,14 @@ function commerce_paypal_wps_order_form($form, &$form_state, $order, $settings) 
     'paymentaction' => $settings['payment_action'],
 
     // Set the currency and language codes
-    'currency_code' => in_array($currency_code, array_keys(commerce_paypal_wps_currencies())) ? $currency_code : $settings['currency_code'],
+    'currency_code' => $currency_code,
     'lc' => $settings['language'],
 
     // Use the timestamp to generate a unique invoice number
     'invoice' => commerce_paypal_ipn_invoice($order),
 
     // Define a single item in the cart representing the whole order
-    'amount_1' => round(commerce_currency_amount_to_decimal($amount, $currency_code), 2),
+    'amount_1' => commerce_currency_amount_to_decimal(commerce_currency_convert($amount, $order_currency_code, $currency_code), $currency_code),
     'item_name_1' => t('Order @order_number at @store', array('@order_number' => $order->order_number, '@store' => variable_get('site_name', url('<front>', array('absolute' => TRUE))))),
     'on0_1' => t('Product count'),
     'os0_1' => commerce_line_items_quantity($wrapper->commerce_line_items, commerce_product_line_item_types()),
@@ -370,12 +471,47 @@ function commerce_paypal_wps_server_url($server) {
  * Returns an array of all possible language codes.
  */
 function commerce_paypal_wps_languages() {
-  return drupal_map_assoc(array('AU', 'DE', 'FR', 'IT', 'GB', 'ES', 'US'));
+  return array(
+    t('By country') => array(
+      'AU' => t('Australia'),
+      'AT' => t('Austria'),
+      'BE' => t('Belgium'),
+      'BR' => t('Brazil'),
+      'CA' => t('Canada'),
+      'CN' => t('China'),
+      'FR' => t('France'),
+      'DE' => t('Germany'),
+      'IT' => t('Italy'),
+      'NL' => t('Netherlands'),
+      'PL' => t('Poland'),
+      'PT' => t('Portugal'),
+      'RU' => t('Russia'),
+      'ES' => t('Spain'),
+      'CH' => t('Switzerland'),
+      'GB' => t('United Kingdom'),
+      'US' => t('United States'),
+    ),
+    t('By language') => array(
+      'da_DK' => t('Danish (for Denmark only)'),
+      'he_IL' => t('Hebrew (for all)'),
+      'id_ID' => t('Indonesian (for Indonesia only)'),
+      'jp_JP' => t('Japanese (for Japan only)'),
+      'no_NO' => t('Norwegian (for Norway only)'),
+      'pt_BR' => t('Brazilian Portuguese (for Portugal and Brazil only)'),
+      'ru_RU' => t('Russian (for Lithuania, Latvia, and Ukraine only)'),
+      'sv_SE' => t('Swedish (for Sweden only)'),
+      'th_TH' => t('Thai (for Thailand only)'),
+      'tr_TR' => t('Turkish (for Turkey only)'),
+      'zh_CN' => t('Simplified Chinese (for China only)'),
+      'zh_HK' => t('Traditional Chinese (for Hong Kong only)'),
+      'zh_TW' => t('Traditional Chinese (for Taiwan only)'),
+    ),
+  );
 }
 
 /**
  * Returns an array of all possible currency codes.
  */
 function commerce_paypal_wps_currencies() {
-  return drupal_map_assoc(array('AUD', 'BRL', 'CAD', 'CHF', 'CZK', 'DKK', 'EUR', 'GBP', 'HKD', 'HUF', 'ILS', 'JPY', 'MXN', 'MYR', 'NOK', 'NZD', 'PHP', 'PLN', 'SEK', 'SGD', 'THB', 'TWD', 'USD'));
+  return drupal_map_assoc(array('AUD', 'BRL', 'CAD', 'CHF', 'CZK', 'DKK', 'EUR', 'GBP', 'HKD', 'HUF', 'ILS', 'JPY', 'MXN', 'MYR', 'NOK', 'NZD', 'PHP', 'PLN', 'SEK', 'SGD', 'THB', 'TRY', 'TWD', 'USD'));
 }

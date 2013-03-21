@@ -7,6 +7,55 @@
 
 
 /**
+ * Implements hook_menu().
+ */
+function commerce_paypal_wpp_menu() {
+  $items = array();
+
+  // Add a menu item for capturing authorizations.
+  $items['admin/commerce/orders/%commerce_order/payment/%commerce_payment_transaction/paypal-wpp-capture'] = array(
+    'title' => 'Capture',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('commerce_paypal_wpp_capture_form', 3, 5),
+    'access callback' => 'commerce_paypal_wpp_capture_access',
+    'access arguments' => array(3, 5),
+    'type' => MENU_DEFAULT_LOCAL_TASK,
+    'context' => MENU_CONTEXT_INLINE,
+    'weight' => 2,
+    'file' => 'includes/commerce_paypal_wpp.admin.inc',
+  );
+
+  return $items;
+}
+
+/**
+ * Determines access to the prior authorization capture form for PayPal WPP
+ * credit card transactions.
+ *
+ * @param $order
+ *   The order the transaction is on.
+ * @param $transaction
+ *   The payment transaction object to be captured.
+ *
+ * @return
+ *   TRUE or FALSE indicating capture access.
+ */
+function commerce_paypal_wpp_capture_access($order, $transaction) {
+  // Return FALSE if the transaction isn't for PayPal or isn't awaiting capture.
+  if ($transaction->payment_method != 'paypal_wpp' || $transaction->remote_status != 'Authorization') {
+    return FALSE;
+  }
+
+  // Return FALSE if it is more than 29 days past the original authorization.
+  if (REQUEST_TIME - $transaction->created > 86400 * 29) {
+    return FALSE;
+  }
+
+  // Allow access if the user can update payments on this transaction.
+  return commerce_payment_transaction_access('update', $transaction);
+}
+
+/**
  * Implements hook_commerce_payment_method_info().
  */
 function commerce_paypal_wpp_commerce_payment_method_info() {
@@ -37,6 +86,7 @@ function commerce_paypal_wpp_default_settings() {
     'code' => TRUE,
     'card_types' => drupal_map_assoc(array('visa', 'mastercard', 'amex', 'discover')),
     'currency_code' => in_array($default_currency, array_keys(commerce_paypal_wpp_currencies())) ? $default_currency : 'USD',
+    'allow_supported_currencies' => FALSE,
     'txn_type' => COMMERCE_CREDIT_AUTH_CAPTURE,
     'log' => array('request' => 0, 'response' => 0),
   );
@@ -45,11 +95,12 @@ function commerce_paypal_wpp_default_settings() {
 /**
  * Payment method callback: settings form.
  */
-function commerce_paypal_wpp_settings_form($settings = NULL) {
+function commerce_paypal_wpp_settings_form($settings = array()) {
   module_load_include('inc', 'commerce_payment', 'includes/commerce_payment.credit_card');
-  $settings += commerce_paypal_wpp_default_settings();
-
   $form = array();
+
+  // Merge default settings into the stored settings array.
+  $settings = (array) $settings + commerce_paypal_wpp_default_settings();
 
   $form['api_username'] = array(
     '#type' => 'textfield',
@@ -91,10 +142,16 @@ function commerce_paypal_wpp_settings_form($settings = NULL) {
   );
   $form['currency_code'] = array(
     '#type' => 'select',
-    '#title' => t('Currency code'),
-    '#description' => t('Transactions can only be processed in one of the listed currencies.'),
+    '#title' => t('Default currency'),
+    '#description' => t('Transactions in other currencies will be converted to this currency, so multi-currency sites must be configured to use appropriate conversion rates.'),
     '#options' => commerce_paypal_wpp_currencies(),
     '#default_value' => $settings['currency_code'],
+  );
+  $form['allow_supported_currencies'] = array(
+    '#type' => 'checkbox',
+    '#title' => t('Allow transactions to use any currency in the options list above.'),
+    '#description' => t('Transactions in unsupported currencies will still be converted into the default currency.'),
+    '#default_value' => $settings['allow_supported_currencies'],
   );
   $form['txn_type'] = array(
     '#type' => 'radios',
@@ -172,7 +229,84 @@ function commerce_paypal_wpp_submit_form_validate($payment_method, $pane_form, $
  * Payment method callback: checkout form submission.
  */
 function commerce_paypal_wpp_submit_form_submit($payment_method, $pane_form, $pane_values, $order, $charge) {
+  // Display an error and prevent the payment attempt if PayPal WPP has not been
+  // configured yet.
+  if (empty($payment_method['settings'])) {
+    drupal_set_message(t('This payment method must be configured by an administrator before it can be used.'), 'error');
+    return FALSE;
+  }
+
+  // Ensure we can determine a valid IPv4 IP address as required by PayPal WPP.
+  $ip_address = ip_address();
+
+  // Go ahead and convert localhost from IPv6 to IPv4.
+  if ($ip_address == '::1') {
+    $ip_address = '127.0.0.1';
+    watchdog('commerce_paypal_wpp', 'PayPal WPP must be able to retrieve an IPv4 IP address from the ip_address() function when not testing payments from localhost. While testing from localhost, your IPv6 address ::1 was automatically converted to 127.0.0.1.', array(), WATCHDOG_WARNING);
+  }
+
+  if (!filter_var($ip_address, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+    drupal_set_message(t('This payment method is not supported by the current web server configuration.'), 'error');
+    watchdog('commerce_paypal_wpp', 'PayPal WPP must be able to retrieve an IPv4 IP address from the ip_address() function when not testing payments from localhost.', array(), WATCHDOG_ERROR);
+    return FALSE;
+  }
+
+  // Determine the currency code to use to actually process the transaction,
+  // which will either be the default currency code or the currency code of the
+  // charge if it's supported by PayPal if that option is enabled.
+  $currency_code = $payment_method['settings']['currency_code'];
+
+  if (!empty($payment_method['settings']['allow_supported_currencies']) && in_array($charge['currency_code'], array_keys(commerce_paypal_wpp_currencies()))) {
+    $currency_code = $charge['currency_code'];
+  }
+
+  // Convert the charge amount to the specified currency.
+  $amount = commerce_currency_convert($charge['amount'], $charge['currency_code'], $currency_code);
+
+  // PayPal WPP requires a billing address, so ensure one has been added to the
+  // order before building the name-value pair array.
   $order_wrapper = entity_metadata_wrapper('commerce_order', $order);
+  $valid_billing_address = TRUE;
+
+  if (empty($order->commerce_customer_billing) || empty($order_wrapper->commerce_customer_billing->value()->commerce_customer_address)) {
+    $valid_billing_address = FALSE;
+  }
+  else {
+    // Check the values in the billing address array required by PayPal.
+    $address_value = $order_wrapper->commerce_customer_billing->commerce_customer_address->value();
+
+    if (empty($address_value['name_line']) && empty($address_value['first_name'])) {
+      $valid_billing_address = FALSE;
+    }
+
+    foreach (array('thoroughfare', 'locality', 'postal_code', 'country') as $address_key) {
+      if (empty($address_value[$address_key])) {
+        $valid_billing_address = FALSE;
+      }
+    }
+  }
+
+  // Without a valid villing address, display and log the error messages and
+  // prevent the payment attempt.
+  if (!$valid_billing_address) {
+    // Display a general error to the customer if we can't find the address.
+    drupal_set_message(t('We cannot process your credit card payment without a valid billing address.'), 'error');
+
+    // Provide a more descriptive error message in the failed transaction and
+    // the watchdog.
+    $transaction = commerce_payment_transaction_new('paypal_wpp', $order->order_id);
+    $transaction->instance_id = $payment_method['instance_id'];
+    $transaction->amount = $amount;
+    $transaction->currency_code = $currency_code;
+    $transaction->payload[REQUEST_TIME] = array();
+    $transaction->status = COMMERCE_PAYMENT_STATUS_FAILURE;
+    $transaction->message = t('The customer must be able to supply a billing address through the default address field of the core billing information customer profile to pay via PayPal WPP.');
+    commerce_payment_transaction_save($transaction);
+
+    watchdog('commerce_paypal_wpp', 'A PayPal WPP transaction failed because the order did not have a value for the default billing address field. Your order or checkout configuration may need to be adjusted to support credit card payment via PayPal WPP.', NULL, WATCHDOG_ERROR);
+
+    return FALSE;
+  }
 
   // Build a name-value pair array for this transaction.
   $nvp = array(
@@ -183,8 +317,8 @@ function commerce_paypal_wpp_submit_form_submit($payment_method, $pane_form, $pa
     'CREDITCARDTYPE' => commerce_paypal_wpp_card_type($pane_values['credit_card']['type']),
     'ACCT' => $pane_values['credit_card']['number'],
     'EXPDATE' => $pane_values['credit_card']['exp_month'] . $pane_values['credit_card']['exp_year'],
-    'AMT' => commerce_currency_amount_to_decimal(commerce_currency_convert($charge['amount'], $charge['currency_code'], $payment_method['settings']['currency_code']), $charge['currency_code']),
-    'CURRENCYCODE' => $payment_method['settings']['currency_code'],
+    'AMT' => commerce_currency_amount_to_decimal($amount, $currency_code),
+    'CURRENCYCODE' => $currency_code,
   );
 
   // Add the start date and issue number if processing a Maestro or Solo card.
@@ -231,7 +365,7 @@ function commerce_paypal_wpp_submit_form_submit($payment_method, $pane_form, $pa
 
     // Customer Information
     'EMAIL' => substr($order->mail, 0, 127),
-    'IPADDRESS' => substr(ip_address(), 0, 15),
+    'IPADDRESS' => substr($ip_address, 0, 15),
     'FIRSTNAME' => substr($billing_address['first_name'], 0, 25),
     'LASTNAME' => substr($billing_address['last_name'], 0, 25),
     'STREET' => substr($billing_address['thoroughfare'], 0, 100),
@@ -248,8 +382,8 @@ function commerce_paypal_wpp_submit_form_submit($payment_method, $pane_form, $pa
   // Prepare a transaction object to log the API response.
   $transaction = commerce_payment_transaction_new('paypal_wpp', $order->order_id);
   $transaction->instance_id = $payment_method['instance_id'];
-  $transaction->amount = $charge['amount'];
-  $transaction->currency_code = $payment_method['settings']['currency_code'];
+  $transaction->amount = $amount;
+  $transaction->currency_code = $currency_code;
   $transaction->payload[REQUEST_TIME] = $response;
 
   // Build a meaningful response message.
@@ -469,15 +603,8 @@ function commerce_paypal_wpp_card_type($card_type) {
 }
 
 /**
- * Returns an array of all possible language codes.
- */
-function commerce_paypal_wpp_languages() {
-  return drupal_map_assoc(array('AU', 'DE', 'FR', 'IT', 'GB', 'ES', 'US'));
-}
-
-/**
- * Returns an array of all possible currency codes.
+ * Returns an array of all possible Direct Payment currency codes.
  */
 function commerce_paypal_wpp_currencies() {
-  return drupal_map_assoc(array('AUD', 'BRL', 'CAD', 'CHF', 'CZK', 'DKK', 'EUR', 'GBP', 'HKD', 'HUF', 'ILS', 'JPY', 'MXN', 'MYR', 'NOK', 'NZD', 'PHP', 'PLN', 'SEK', 'SGD', 'THB', 'TWD', 'USD'));
+  return drupal_map_assoc(array('AUD', 'CAD', 'CHF', 'CZK', 'DKK', 'EUR', 'GBP', 'HKD', 'HUF', 'JPY', 'NOK', 'NZD', 'PLN', 'SEK', 'SGD', 'USD'));
 }

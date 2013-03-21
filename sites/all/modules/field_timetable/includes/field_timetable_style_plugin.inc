@@ -194,7 +194,8 @@ class field_timetable_style_plugin extends views_plugin_style {
         } 
         elseif ($title_field == 'description') {
           // Nothing to do.
-        } else {
+        } 
+        else {
           $title_field = 'field_' . $title_field;
           $temp = $row->$title_field;
           $titles[] = $temp[0]['rendered']['#markup'];
@@ -202,7 +203,8 @@ class field_timetable_style_plugin extends views_plugin_style {
       }
       if (empty($titles)) {
         $title = '';
-      } else {
+      } 
+      else {
         $title = implode(', ',$titles);
       }
 
@@ -217,12 +219,11 @@ class field_timetable_style_plugin extends views_plugin_style {
         default:
           $color = 'field_' . $color_field;
           $color = $row->$color;
-          $color = $color[0]['raw']['value'];
+          $color = $color[0]['rendered']['#markup'];
       }
 
-      // for each timetable field
+      // for each timetable field.
       $node = $row->_field_data['nid']['entity'];
-
       foreach ($timetable_fields as $timetable_field) {
         $tmp = $node->$timetable_field;
         $row = array();
@@ -239,7 +240,7 @@ class field_timetable_style_plugin extends views_plugin_style {
       array(
         'view' => $this->view,
         'options' => $this->options,
-        'rows' => $rows
+        'rows' => $rows,
       )
     );
 
